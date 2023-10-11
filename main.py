@@ -3,7 +3,7 @@ import random
 import tensorflow as tf
 import tensorflow_hub as hub
 import numpy as np
-import infer, vocabulary, alignment, smith_waterman_np  # Requires google_research/google-research.
+import infer, vocabulary, alignment, smith_waterman_np
 from models import dedal, encoders, aligners, homology, simcse
 from train import learning_rate_schedules, losses, align_metrics
 from data import align_transforms, loaders
@@ -80,15 +80,14 @@ class Dataset:
         return inputs, labels
 
 
-# dedal_model = hub.KerasLayer("dedal_3", trainable=True)
-dedal_model = dedal.DedalLight(
-    encoder=encoders.TransformerEncoder(),
-    aligner=aligners.SoftAligner(),
-    homology_head=homology.LogCorrectedLogits())
+dedal_model = hub.KerasLayer("dedal_3", trainable=True)
+# dedal_model = dedal.DedalLight(
+#     encoder=encoders.TransformerEncoder(),
+#     aligner=aligners.SoftAligner(),
+#     homology_head=homology.LogCorrectedLogits())
 
 
 def eval(data):
-    metric = align_metrics.AlignmentPrecisionRecall('align')
     create_alignment_targets = align_transforms.CreateAlignmentTargets()
     vocab = vocabulary.get_default()
     cnt = 0
@@ -96,30 +95,15 @@ def eval(data):
     total = np.zeros(8)
     total2 = np.zeros(8)
     for pair in data:
-        # l = len(pair['gapped_sequence_x'])
         inputs = infer.preprocess(pair['sequence_x'], pair['sequence_y'])
         true_alignment = create_alignment_targets.call(
             tf.convert_to_tensor(vocab.encode(pair['gapped_sequence_x']), tf.int32),
             tf.convert_to_tensor(vocab.encode(pair['gapped_sequence_y']), tf.int32))
         true_alignments = tf.stack([true_alignment], 0)
         pred_alignment = dedal_model(inputs, training=False)
-        pred_alignments = [pred_alignment['sw_scores'], pred_alignment['paths'], pred_alignment['sw_params']]
-
         true_paths = alignment.alignments_to_paths(true_alignments, 512, 512)
         match_indices_pred = alignment.paths_to_state_indicators(pred_alignment['paths'], 'match')[0]
         match_indices_true = alignment.paths_to_state_indicators(true_paths, 'match')[0]
-        # indices1 = []
-        # indices2 = []
-        # for i in range(512):
-        #     for j in range(512):
-        #         if match_indices_pred[i, j] == 1:
-        #             indices1.append((i, j))
-        #         if match_indices_true[i, j] == 1:
-        #             indices2.append((i, j))
-        # print(indices1)
-        # print(indices2)
-        # print(match_indices_pred)
-        # print(match_indices_true)
         PID = pair["percent_identity"]
         pid_loc = min(7, int(float(PID) / 0.1))
         correct[pid_loc] += tf.reduce_sum(
@@ -130,27 +114,9 @@ def eval(data):
         precision = correct / total
         recall = correct / total2
         F1 = 2 * (precision * recall) / (precision + recall)
+
         if cnt > 0 and cnt % 400 == 0:
             print(F1)
-        # print(f'precision: {correct / total}')
-        # print(f'recall: {correct / total2}')
-
-        # metric.update_state(true_alignments, pred_alignments)
-        # result = metric.result()
-        # if epoch % 50 == 0:
-        #     print(f'PID: {pair["percent_identity"]}')
-        #     print(f'precision: {result["align/precision"].numpy()}')
-        #     print(f'recall: {result["align/recall"].numpy()}')
-        #     print(f'f1: {result["align/f1"].numpy()}\n')
-
-        # print('      ' + pair['gapped_sequence_x'])
-        # print('      ' + pair['gapped_sequence_y'])
-        # print('')
-        # output = infer.expand([pred_alignment['sw_scores'], pred_alignment['paths'], pred_alignment['sw_params']])
-        # output = infer.postprocess(output, len(pair['sequence_x']), len(pair['sequence_y']))
-        # alignments = infer.Alignment(pair['sequence_x'], pair['sequence_y'], *output)
-        # print(alignments)
-        # print('')
         if 0 not in total or cnt > 400:
             break
         cnt += 1
@@ -163,20 +129,12 @@ def train(batch):
         learning_rate=learning_rate_schedules.InverseSquareRootDecayWithWarmup(lr_max=1e-4,
                                                                                warmup_steps=8_000),
         epsilon=1e-08, clipnorm=1.0)
-    # labels = tf.range(0, batch * 4, dtype=tf.int32)
-    # labels = tf.range(0, 6, dtype=tf.int32)
-    # labels = labels + 1 - labels % 2 * 2
+
     for epoch in range(5):
         steps = 0
         for inputs, labels in Dataset(batch):
-            # if steps > 100:
-            #     break
             steps += 1
             with tf.GradientTape() as g:
-                # inputs = [infer.preprocess(data[j]['sequence_x'], data[j]['sequence_y']) for j in
-                #           range(i * batch, (i + 1) * batch)]
-                # inputs = inputs[:6:2]
-                # inputs = infer.preprocess(pair['sequence_x'], pair['sequence_y'])
                 scores = simcse_model(inputs, training=True)
                 loss = criterion(scores, labels)
                 grad = g.gradient(loss, dedal_model.trainable_variables)

@@ -10,7 +10,7 @@ Then in the folder, you should download the trained dedal model from the followi
 ```
 https://tfhub.dev/google/dedal/3
 ```
-After that, there will be a folder called dedal_3 in this folder
+After that, there will be a folder called dedal_3 in this folder.
 Then you may install the necessary requirements by executing:
 ```
 pip install -r requirements.txt

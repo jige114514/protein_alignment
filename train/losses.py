@@ -28,11 +28,11 @@ class ContrastiveLoss(tf.losses.Loss):
 
         Args:
           scores: pos and neg pairs alignments scores
+          labels: label which sequence pairs are homologous
 
         Returns:
           loss
         """
-        # batch_size = scores.shape[0]
         # 单位对角矩阵——对角线上为1e12很大的值
         c = tf.eye(labels.shape[0]) * 1e12
         # 单位对角矩阵——对角线上为很小的值
