@@ -35,9 +35,11 @@ class ContrastiveLoss(tf.losses.Loss):
         """
         # 单位对角矩阵——对角线上为1e12很大的值
         c = tf.eye(labels.shape[0]) * 1e12
-        # 单位对角矩阵——对角线上为很小的值
+        # 归一化
         scores = tf.nn.l2_normalize(scores)
+        # 屏蔽掉对角的比对分数
         scores = scores - c
+        # 除以温度，可用于放大分数
         scores /= self._temp
 
         return tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits(labels, scores))

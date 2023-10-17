@@ -4,10 +4,11 @@ import tensorflow as tf
 import tensorflow_hub as hub
 import numpy as np
 import infer, vocabulary, alignment, smith_waterman_np
-from models import dedal, encoders, aligners, homology, simcse
+from models import dedal, encoders, aligners, homology, contrastive
 from train import learning_rate_schedules, losses, align_metrics
 from data import align_transforms, loaders
 import pandas as pd
+from parser import args
 
 
 def equal(x, y):
@@ -16,10 +17,17 @@ def equal(x, y):
     return tf.reduce_sum(equal_array) == tf.reduce_sum(tf.ones_like(equal_array))
 
 
+# 读取pfasum60替换矩阵
 df = pd.read_csv('pfam/pfasum60.csv', sep='\t', index_col=0)
 
 
 def get_substitution_matrix(seq1, seq2):
+    """
+    读取dataframe中的替换矩阵
+    :param seq1:
+    :param seq2:
+    :return:
+    """
     len1 = len(seq1)
     len2 = len(seq2)
     sm = np.zeros((len1, len2))
@@ -30,9 +38,12 @@ def get_substitution_matrix(seq1, seq2):
 
 
 def get_data():
+    # 读取蛋白质序列
     tsvLoader = loaders.TSVLoader('path/to/alignment/data')
     dataset = tsvLoader.load('train')
+    # data是一个字典，包含成对同源序列的信息
     data = list(dataset.as_numpy_iterator())
+    # seqs是所有序列的列表
     seqs = set()
     for i, seq_pair in enumerate(data):
         for k, v in seq_pair.items():
@@ -47,6 +58,10 @@ data, seqs = get_data()
 
 
 class Dataset:
+    """
+    有监督对比学习的dataset
+    """
+
     def __init__(self, batch):
         assert batch % 2 == 0
         random.shuffle(seqs)
@@ -59,32 +74,76 @@ class Dataset:
         return self
 
     def __next__(self):
+        # 最后一批若不足batch_size，则舍弃
         if (self.cnt + 1) * self.batch >= self.l:
             raise StopIteration
         cur_seqs = self.seqs[self.cnt * self.batch:(self.cnt + 1) * self.batch]
+        # 将成对序列进行预处理，填充到长度512，便于模型处理
         inputs = [infer.preprocess(cur_seqs[i * 2], cur_seqs[i * 2 + 1]) for i in
                   range(self.batch // 2)]
+        # 将所有成对序列合并
         inputs = tf.concat(inputs, 0)
         self.cnt += 1
+        # 比对分数矩阵
         align_values = np.zeros((self.batch, self.batch))
+        # gap_open
         go = np.ones((1,)) * 15
+        # gap_extend
         ge = np.ones((1,)) * 1.5
         for i in range(self.batch - 1):
             for j in range(i + 1, self.batch):
                 sm = get_substitution_matrix(cur_seqs[i], cur_seqs[j])
                 sm = np.stack([sm], 0)
                 align_values[i][j] = align_values[j][i] = smith_waterman_np.soft_sw_affine(sm, go, ge)
+        # 设置比对分数阈值为200
+        # 将在pfasum60使用sw算法得到的比对分数>=200的序列对视为同源序列，作为label
         labels = align_values >= 200
         labels = tf.cast(labels, tf.float16)
+        # 将label每一行转换为和为1的概率分布
         labels = labels / tf.reduce_sum(labels, 1, True)
         return inputs, labels
 
 
-dedal_model = hub.KerasLayer("dedal_3", trainable=True)
-# dedal_model = dedal.DedalLight(
-#     encoder=encoders.TransformerEncoder(),
-#     aligner=aligners.SoftAligner(),
-#     homology_head=homology.LogCorrectedLogits())
+class UnsupervisedDataset:
+    """
+    无监督simCSE的dataset
+    """
+
+    def __init__(self, batch):
+        assert batch % 2 == 0
+        random.shuffle(seqs)
+        self.seqs = [item for seq in seqs for item in [seq] * 2]
+        self.cnt = 0
+        self.batch = batch
+        self.l = len(seqs)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        # 最后一批若不足batch_size，则舍弃
+        if (self.cnt + 1) * self.batch >= self.l:
+            raise StopIteration
+        cur_seqs = self.seqs[self.cnt * self.batch:(self.cnt + 1) * self.batch]
+        # 将成对序列进行预处理，填充到长度512，便于模型处理
+        inputs = [infer.preprocess(cur_seqs[i * 2], cur_seqs[i * 2 + 1]) for i in
+                  range(self.batch // 2)]
+        # 将所有成对序列合并
+        inputs = tf.concat(inputs, 0)
+        self.cnt += 1
+        labels = tf.range(self.batch)
+        mask = [1 if i % 2 == 0 else -1 for i in range(self.batch)]
+        # 将label从[0,1,2,3,...]转换为[1,0,3,2,...]
+        labels += tf.constant(mask)
+        return inputs, labels
+
+
+# 载入已训练好的dedal模型
+# dedal_model = hub.KerasLayer("dedal_3", trainable=True)
+dedal_model = dedal.DedalLight(
+    encoder=encoders.TransformerEncoder(),
+    aligner=aligners.SoftAligner(),
+    homology_head=homology.LogCorrectedLogits())
 
 
 def eval(data):
@@ -96,15 +155,18 @@ def eval(data):
     total2 = np.zeros(8)
     for pair in data:
         inputs = infer.preprocess(pair['sequence_x'], pair['sequence_y'])
+        # 序列对的正确比对
         true_alignment = create_alignment_targets.call(
             tf.convert_to_tensor(vocab.encode(pair['gapped_sequence_x']), tf.int32),
             tf.convert_to_tensor(vocab.encode(pair['gapped_sequence_y']), tf.int32))
         true_alignments = tf.stack([true_alignment], 0)
+        # 通过模型得到的预测比对
         pred_alignment = dedal_model(inputs, training=False)
         true_paths = alignment.alignments_to_paths(true_alignments, 512, 512)
         match_indices_pred = alignment.paths_to_state_indicators(pred_alignment['paths'], 'match')[0]
         match_indices_true = alignment.paths_to_state_indicators(true_paths, 'match')[0]
         PID = pair["percent_identity"]
+        # pid范围0~0.7，每0.1划分一个间隔
         pid_loc = min(7, int(float(PID) / 0.1))
         correct[pid_loc] += tf.reduce_sum(
             tf.cast(tf.logical_and(tf.cast(match_indices_pred, tf.bool), tf.cast(match_indices_true, tf.bool)),
@@ -113,38 +175,54 @@ def eval(data):
         total2[pid_loc] += tf.reduce_sum(match_indices_true)
         precision = correct / total
         recall = correct / total2
+        # 计算F1分数
         F1 = 2 * (precision * recall) / (precision + recall)
 
         if cnt > 0 and cnt % 400 == 0:
-            print(F1)
+            print(f'F1 = {F1}')
         if 0 not in total or cnt > 400:
             break
         cnt += 1
 
 
-def train(batch):
-    simcse_model = simcse.SimCSE(dedal_model)
+def train(batch, epochs):
+    """
+    对比学习微调
+    :param batch: 一批中的序列数（包括复制的序列）
+    """
+    contrastive_model = contrastive.Contrastive(dedal_model)
     criterion = losses.ContrastiveLoss()
     optimizer = tf.keras.optimizers.Adam(
         learning_rate=learning_rate_schedules.InverseSquareRootDecayWithWarmup(lr_max=1e-4,
                                                                                warmup_steps=8_000),
         epsilon=1e-08, clipnorm=1.0)
 
-    for epoch in range(5):
+    # 选择有监督或无监督训练的dataset
+    if args.dataset == 'supervised':
+        dataset = Dataset(batch)
+    else:
+        dataset = UnsupervisedDataset(batch)
+
+    for epoch in range(epochs):
         steps = 0
-        for inputs, labels in Dataset(batch):
+        for inputs, labels in dataset:
             steps += 1
             with tf.GradientTape() as g:
-                scores = simcse_model(inputs, training=True)
+                scores = contrastive_model(inputs, training=True)
+                # 将比对分数视为成对序列的相似度
                 loss = criterion(scores, labels)
                 grad = g.gradient(loss, dedal_model.trainable_variables)
                 optimizer.apply_gradients(zip(grad, dedal_model.trainable_variables))
                 if steps % 1 == 0:
-                    print(loss)
-                if steps % 10 == 0:
+                    print(f'loss = {loss}')
+                if steps % 1 == 0:
                     eval(data)
 
 
-eval(data)
-train(8)
-eval(data)
+if __name__ == '__main__':
+    # 先进行初次评估
+    eval(data)
+    # 对比学习微调
+    train(8, 2)
+    # 微调后评估
+    eval(data)
