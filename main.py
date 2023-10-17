@@ -38,6 +38,10 @@ def get_substitution_matrix(seq1, seq2):
 
 
 def get_data():
+    """
+    获取数据
+    :return: 蛋白质序列对数据信息和所有蛋白质序列
+    """
     # 读取蛋白质序列
     tsvLoader = loaders.TSVLoader('path/to/alignment/data')
     dataset = tsvLoader.load('train')
@@ -139,14 +143,20 @@ class UnsupervisedDataset:
 
 
 # 载入已训练好的dedal模型
-# dedal_model = hub.KerasLayer("dedal_3", trainable=True)
-dedal_model = dedal.DedalLight(
-    encoder=encoders.TransformerEncoder(),
-    aligner=aligners.SoftAligner(),
-    homology_head=homology.LogCorrectedLogits())
+dedal_model = hub.KerasLayer("dedal_3", trainable=True)
+
+
+# dedal_model = dedal.DedalLight(
+#     encoder=encoders.TransformerEncoder(),
+#     aligner=aligners.SoftAligner(),
+#     homology_head=homology.LogCorrectedLogits())
 
 
 def eval(data):
+    """
+    在测试集上评估F1分数
+    :param data: 测试集数据
+    """
     create_alignment_targets = align_transforms.CreateAlignmentTargets()
     vocab = vocabulary.get_default()
     cnt = 0
@@ -189,6 +199,7 @@ def train(batch, epochs):
     """
     对比学习微调
     :param batch: 一批中的序列数（包括复制的序列）
+    :param epochs: 训练轮数
     """
     contrastive_model = contrastive.Contrastive(dedal_model)
     criterion = losses.ContrastiveLoss()

@@ -17,8 +17,9 @@ pip install -r requirements.txt
 ```
 
 ## Train
-Then you can execute the code by running the following command:
+Then you can execute the code by running the following command, you can choose supervised or unsupervised dataset(supervised default):
 ```
-python main.py
+python main.py --dataset supervised
+python main.py --dataset unsupervised
 ```
 In the process of executing, the program will output train loss and F1 scores of sequence pairs with distinct PID
