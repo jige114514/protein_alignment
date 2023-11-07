@@ -1,14 +1,17 @@
 import random
-
+import numpy as np
+import pandas as pd
 import tensorflow as tf
 import tensorflow_hub as hub
-import numpy as np
-import infer, vocabulary, alignment, smith_waterman_np
-from models import dedal, encoders, aligners, homology, contrastive
-from train import learning_rate_schedules, losses, align_metrics
+
+import alignment
+import infer
+import smith_waterman_np
+import vocabulary
 from data import align_transforms, loaders
-import pandas as pd
+from models import contrastive, dedal, encoders, aligners, homology
 from parser import args
+from train import learning_rate_schedules, losses
 
 
 def equal(x, y):
@@ -17,8 +20,15 @@ def equal(x, y):
     return tf.reduce_sum(equal_array) == tf.reduce_sum(tf.ones_like(equal_array))
 
 
-# 读取pfasum60替换矩阵
-df = pd.read_csv('pfam/pfasum60.csv', sep='\t', index_col=0)
+def setup_seed(seed):
+    """
+    设置随机种子
+    :param seed: 随机种子
+    :return:
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
 
 
 def get_substitution_matrix(seq1, seq2):
@@ -56,9 +66,6 @@ def get_data():
         seqs.add(seq_pair['sequence_y'])
     seqs = list(seqs)
     return data, seqs
-
-
-data, seqs = get_data()
 
 
 class Dataset:
@@ -142,16 +149,6 @@ class UnsupervisedDataset:
         return inputs, labels
 
 
-# 载入已训练好的dedal模型
-dedal_model = hub.KerasLayer("dedal_3", trainable=True)
-
-
-# dedal_model = dedal.DedalLight(
-#     encoder=encoders.TransformerEncoder(),
-#     aligner=aligners.SoftAligner(),
-#     homology_head=homology.LogCorrectedLogits())
-
-
 def eval(data):
     """
     在测试集上评估F1分数
@@ -163,6 +160,7 @@ def eval(data):
     correct = np.zeros(8)
     total = np.zeros(8)
     total2 = np.zeros(8)
+
     for pair in data:
         inputs = infer.preprocess(pair['sequence_x'], pair['sequence_y'])
         # 序列对的正确比对
@@ -188,10 +186,8 @@ def eval(data):
         # 计算F1分数
         F1 = 2 * (precision * recall) / (precision + recall)
 
-        if cnt > 0 and cnt % 400 == 0:
+        if cnt % 100 == 0:
             print(f'F1 = {F1}')
-        if 0 not in total or cnt > 400:
-            break
         cnt += 1
 
 
@@ -214,6 +210,9 @@ def train(batch, epochs):
     else:
         dataset = UnsupervisedDataset(batch)
 
+    # 打印train loss的间隔
+    interval = args.print_interval
+
     for epoch in range(epochs):
         steps = 0
         for inputs, labels in dataset:
@@ -224,16 +223,34 @@ def train(batch, epochs):
                 loss = criterion(scores, labels)
                 grad = g.gradient(loss, dedal_model.trainable_variables)
                 optimizer.apply_gradients(zip(grad, dedal_model.trainable_variables))
-                if steps % 1 == 0:
+                if steps % interval == 0:
                     print(f'loss = {loss}')
-                if steps % 1 == 0:
-                    eval(data)
 
 
 if __name__ == '__main__':
+    # 设置随机种子
+    setup_seed(args.seed)
+
+    # 读取pfasum60替换矩阵
+    df = pd.read_csv('pfam/pfasum60.csv', sep='\t', index_col=0)
+    # 获取序列对数据字典和所有蛋白质序列
+    data, seqs = get_data()
+    # 随机打乱数据
+    random.shuffle(data)
+    # 前10%数据作为测试集
+    test_num = int(len(data) * 0.1)
+    test_data = data[:test_num]
+
+    # 载入已训练好的dedal模型
+    dedal_model = hub.KerasLayer("dedal_3", trainable=True)
+    # dedal_model = dedal.DedalLight(
+    #     encoder=encoders.TransformerEncoder(),
+    #     aligner=aligners.SoftAligner(),
+    #     homology_head=homology.LogCorrectedLogits())  # for debug
+
     # 先进行初次评估
-    eval(data)
+    eval(test_data)
     # 对比学习微调
-    train(8, 2)
+    train(args.batch_size, args.epoch)
     # 微调后评估
-    eval(data)
+    eval(test_data)
